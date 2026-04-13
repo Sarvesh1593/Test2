@@ -144,7 +144,6 @@ async function handleText(from, text, history) {
     text.toLowerCase() === "hey" ||
     text.toLowerCase() === "Hello"
   ) {
-    sendWelcome(from);
     history = [];
   }
 
