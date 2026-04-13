@@ -1,0 +1,25 @@
+{
+  "name": "whatsapp-fitbot",
+  "version": "1.0.0",
+  "description": "AI-powered WhatsApp fitness chatbot using Claude AI and Meta Cloud API",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.20.9",
+    "axios": "^1.15.0",
+    "dotenv": "^17.4.1",
+    "express": "^4.22.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
