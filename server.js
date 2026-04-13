@@ -208,7 +208,9 @@ async function handleImage(from, imageId, caption, history) {
 // ─── Call Gemini AI ───────────────────────────────────────────────────────
 async function callGenAI(history) {
   try {
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const model = genAI.getGenerativeModel({
+      model: "gemini-1.5-flash-latest",
+    });
 
     // Convert Anthropic format to Gemini format
     const contents = history.map((msg) => ({
