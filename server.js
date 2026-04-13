@@ -137,21 +137,26 @@ app.post("/webhook", async (req, res) => {
 
 // ─── Handle Text ──────────────────────────────────────────────────────────
 async function handleText(from, text, history) {
-  // Start fresh chat when user types "hello"
-  if (
-    text.toLowerCase() === "hello" ||
-    text.toLowerCase() === "hi" ||
-    text.toLowerCase() === "hey" ||
-    text.toLowerCase() === "Hello"
-  ) {
-    userSessions.set(from, []);
-    history = [];
+  // Normalize input and treat greetings as a fresh start.
+  const normalized = (text || "").trim().toLowerCase();
+
+  if (["hello", "hi", "hey"].includes(normalized)) {
+    // Reset the session in the map and send the welcome message.
+    const newHistory = [];
+    userSessions.set(from, newHistory);
+    await sendWelcome(from);
+    return; // do not send greeting to the AI
   }
+
+  // Ensure we are using the latest session array from the map
+  history = userSessions.get(from) || [];
 
   history.push({ role: "user", content: text });
   const reply = await callGenAI(history);
   history.push({ role: "assistant", content: reply });
   trimHistory(history);
+  // Save updated history back to the session map
+  userSessions.set(from, history);
   await sendMessage(from, reply);
 
   if (history.length === 2) await sendQuickReplies(from);
