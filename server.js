@@ -1,11 +1,11 @@
 const express = require("express");
 const axios = require("axios");
-const Anthropic = require("@anthropic-ai/sdk");
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 const app = express();
 app.use(express.json());
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
@@ -136,7 +136,7 @@ app.post("/webhook", async (req, res) => {
 // ─── Handle Text ──────────────────────────────────────────────────────────
 async function handleText(from, text, history) {
   history.push({ role: "user", content: text });
-  const reply = await callClaude(history);
+  const reply = await callGenAI(history);
   history.push({ role: "assistant", content: reply });
   trimHistory(history);
   await sendMessage(from, reply);
@@ -186,7 +186,7 @@ async function handleImage(from, imageId, caption, history) {
     history.push(imageMessage);
 
     // Step 6: Call Claude with vision
-    const reply = await callClaude(history);
+    const reply = await callGenAI(history);
     history.push({ role: "assistant", content: reply });
     trimHistory(history);
 
@@ -205,18 +205,36 @@ async function handleImage(from, imageId, caption, history) {
   }
 }
 
-// ─── Call Claude AI ───────────────────────────────────────────────────────
-async function callClaude(history) {
+// ─── Call Gemini AI ───────────────────────────────────────────────────────
+async function callGenAI(history) {
   try {
-    const response = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 1024,
-      system: SYSTEM_PROMPT,
-      messages: history,
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+    // Convert Anthropic format to Gemini format
+    const contents = history.map((msg) => ({
+      role: msg.role === "user" ? "user" : "model",
+      parts: Array.isArray(msg.content)
+        ? msg.content.map((part) =>
+            part.type === "image"
+              ? {
+                  inlineData: {
+                    mimeType: part.source.media_type,
+                    data: part.source.data,
+                  },
+                }
+              : { text: part.text },
+          )
+        : [{ text: msg.content }],
+    }));
+
+    const response = await model.generateContent({
+      systemInstruction: SYSTEM_PROMPT,
+      contents: contents,
     });
-    return response.content[0].text;
+
+    return response.response.text();
   } catch (err) {
-    console.error("❌ Claude error:", err.message);
+    console.error("❌ Gemini error:", err.message);
     return `⚠️ I had a moment! Please try again — I'm here to help 💪 ${err.message}`;
   }
 }
