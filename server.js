@@ -1,11 +1,13 @@
 const express = require("express");
 const axios = require("axios");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+const { HfInference } = require("@huggingface/inference");
+// const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 const app = express();
 app.use(express.json());
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+// const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const hf = new HfInference(process.env.HUGGINGFACE_API_KEY);
 
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
@@ -206,41 +208,61 @@ async function handleImage(from, imageId, caption, history) {
 }
 
 // ─── Call Gemini AI ───────────────────────────────────────────────────────
+// async function callGenAI(history) {
+//   try {
+//     const model = genAI.getGenerativeModel({
+//       model: "gemini-2.0-flash",
+//     });
+
+//     // Convert Anthropic format to Gemini format
+//     const contents = history.map((msg) => ({
+//       role: msg.role === "user" ? "user" : "model",
+//       parts: Array.isArray(msg.content)
+//         ? msg.content.map((part) =>
+//             part.type === "image"
+//               ? {
+//                   inlineData: {
+//                     mimeType: part.source.media_type,
+//                     data: part.source.data,
+//                   },
+//                 }
+//               : { text: part.text },
+//           )
+//         : [{ text: msg.content }],
+//     }));
+
+//     const response = await model.generateContent({
+//       systemInstruction: SYSTEM_PROMPT,
+//       contents: contents,
+//     });
+
+//     return response.response.text();
+//   } catch (err) {
+//     console.error("❌ Gemini error:", err.message);
+//     return `⚠️ I had a moment! Please try again — I'm here to help 💪 ${err.message}`;
+//   }
+// }
+
 async function callGenAI(history) {
   try {
-    const model = genAI.getGenerativeModel({
-      model: "gemini-2.0-flash",
+    // Convert history to a text prompt
+    let prompt = SYSTEM_PROMPT + "\n\n";
+    history.forEach((msg) => {
+      prompt += `${msg.role === "user" ? "User" : "Assistant"}: ${msg.content}\n`;
     });
 
-    // Convert Anthropic format to Gemini format
-    const contents = history.map((msg) => ({
-      role: msg.role === "user" ? "user" : "model",
-      parts: Array.isArray(msg.content)
-        ? msg.content.map((part) =>
-            part.type === "image"
-              ? {
-                  inlineData: {
-                    mimeType: part.source.media_type,
-                    data: part.source.data,
-                  },
-                }
-              : { text: part.text },
-          )
-        : [{ text: msg.content }],
-    }));
-
-    const response = await model.generateContent({
-      systemInstruction: SYSTEM_PROMPT,
-      contents: contents,
+    const response = await hf.textGeneration({
+      model: "mistralai/Mistral-7B-Instruct-v0.1",
+      inputs: prompt,
+      parameters: { max_new_tokens: 500 },
     });
 
-    return response.response.text();
+    return response.generated_text;
   } catch (err) {
-    console.error("❌ Gemini error:", err.message);
+    console.error("❌ Hugging Face error:", err.message);
     return `⚠️ I had a moment! Please try again — I'm here to help 💪 ${err.message}`;
   }
 }
-
 // ─── Send WhatsApp Text ───────────────────────────────────────────────────
 async function sendMessage(to, text) {
   try {
