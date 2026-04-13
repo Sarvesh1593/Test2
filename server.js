@@ -217,7 +217,7 @@ async function callClaude(history) {
     return response.content[0].text;
   } catch (err) {
     console.error("❌ Claude error:", err.message);
-    return "⚠️ I had a moment! Please try again — I'm here to help 💪";
+    return `⚠️ I had a moment! Please try again — I'm here to help 💪 ${err.message}`;
   }
 }
 
