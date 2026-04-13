@@ -138,13 +138,9 @@ app.post("/webhook", async (req, res) => {
 // ─── Handle Text ──────────────────────────────────────────────────────────
 async function handleText(from, text, history) {
   // Start fresh chat when user types "hello"
-  if (
-    text.toLowerCase() === "hello" ||
-    text.toLowerCase() === "hi" ||
-    text.toLowerCase() === "hey" ||
-    text.toLowerCase() === "Hello"
-  ) {
-    history = [];
+  if (text === "hello" || text === "hi") {
+    userSessions.set(from, []);
+    history = userSessions.get(from);
   }
 
   history.push({ role: "user", content: text });
