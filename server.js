@@ -137,13 +137,18 @@ app.post("/webhook", async (req, res) => {
 
 // ─── Handle Text ──────────────────────────────────────────────────────────
 async function handleText(from, text, history) {
+  // Reset history for fresh start on certain actions
+  if (text.toLowerCase() === "start over" || text.toLowerCase() === "reset") {
+    userSessions.set(from, []);
+    await sendWelcome(from);
+    return;
+  }
+
   history.push({ role: "user", content: text });
   const reply = await callGenAI(history);
   history.push({ role: "assistant", content: reply });
   trimHistory(history);
   await sendMessage(from, reply);
-
-  if (history.length === 2) await sendQuickReplies(from);
 }
 
 // ─── Handle Image → Full Diet Analysis ───────────────────────────────────
@@ -252,7 +257,7 @@ async function callGenAI(history) {
     });
 
     const response = await hf.textGeneration({
-      model: "mistralai/Mistral-7B-Instruct-v0.1",
+      model: "google/flan-t5-large",
       inputs: prompt,
       parameters: { max_new_tokens: 500 },
     });
