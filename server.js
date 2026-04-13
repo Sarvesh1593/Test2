@@ -137,11 +137,15 @@ app.post("/webhook", async (req, res) => {
 
 // ─── Handle Text ──────────────────────────────────────────────────────────
 async function handleText(from, text, history) {
-  // Reset history for fresh start on certain actions
-  if (text.toLowerCase() === "start over" || text.toLowerCase() === "reset") {
+  // Start fresh chat when user types "hello"
+  if (
+    text.toLowerCase() === "hello" ||
+    text.toLowerCase() === "hi" ||
+    text.toLowerCase() === "hey" ||
+    text.toLowerCase() === "Hello"
+  ) {
     userSessions.set(from, []);
-    await sendWelcome(from);
-    return;
+    history = [];
   }
 
   history.push({ role: "user", content: text });
@@ -149,6 +153,8 @@ async function handleText(from, text, history) {
   history.push({ role: "assistant", content: reply });
   trimHistory(history);
   await sendMessage(from, reply);
+
+  if (history.length === 2) await sendQuickReplies(from);
 }
 
 // ─── Handle Image → Full Diet Analysis ───────────────────────────────────
