@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>FitBot Admin</title>
+    <link rel="stylesheet" href="/admin.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo">💪</div>
+        <div class="title">FitBot Admin</div>
+      </div>
+      <div class="meta">
+        <div id="subsSummary" class="muted">Subscribers: —</div>
+      </div>
+    </header>
+
+    <main class="container layout">
+      <nav class="sidebar card small">
+        <div class="nav">
+          <button class="nav-item active" data-tab="broadcast">Broadcast</button>
+          <button class="nav-item" data-tab="preview">Preview & Test</button>
+        </div>
+        <hr />
+      </nav>
+
+      <section class="main content">
+        <div id="tab-broadcast" class="tab card active">
+          <h2>Broadcast</h2>
+          <label class="label">Choose Meta Template (WhatsApp)</label>
+          <select id="templateSelect" class="select"><option value="">(none)</option></select>
+          <div id="templateStatus" class="muted" style="margin-top:6px">Status: —</div>
+          <label class="label" style="margin-top:6px">Language code</label>
+          <input id="templateLang" class="input" placeholder="en_US" />
+          <div id="paramEditor" class="param-editor" style="margin-top:8px"></div>
+          <label class="label">Targets (comma-separated)</label>
+          <input id="broadcastTargets" class="input" placeholder="447700900000, ..." />
+          <label class="label checkbox"><input id="sendAll" type="checkbox" /> Send to all subscribers</label>
+          <div class="row gap" style="margin-top:8px">
+            <button id="previewBroadcast" class="btn">Preview</button>
+            <button id="sendBroadcast" class="btn primary">Send Broadcast</button>
+          </div>
+          <pre id="broadcastResult" class="result"></pre>
+        </div>
+
+        <div id="tab-preview" class="tab card">
+          <h2>Preview & Test</h2>
+          <div id="previewPhone" class="phone-mockup muted">No preview</div>
+          <label class="label">Test number (international)</label>
+          <input id="testNumber" class="input" placeholder="447700900000" />
+          <div class="row gap" style="margin-top:8px">
+            <button id="saveAndTest" class="btn primary">Send Test</button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div id="modal" class="modal hidden" aria-hidden="true">
+      <div class="modal-panel">
+        <button id="modalClose" class="modal-close" aria-label="Close">×</button>
+        <div id="modalContent"></div>
+        <div class="modal-actions">
+          <button id="modalConfirm" class="btn primary">Confirm</button>
+          <button id="modalCancel" class="btn">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast-wrap"></div>
+
+    <script src="/admin.js"></script>
+  </body>
+</html>

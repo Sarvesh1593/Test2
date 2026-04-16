@@ -1,0 +1,69 @@
+.root{
+  --bg:#f3f6fb; --card:#ffffff; --muted:#6b7280; --accent:#0f62fe; --success:#16a34a; --danger:#dc2626; --max-width:1200px;
+  --radius:10px; --gap:14px; --shadow:0 6px 18px rgba(20,30,40,0.06);
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;color:#0f1724;background:var(--bg);}
+.topbar{display:flex;align-items:center;justify-content:space-between;padding:14px 20px;background:#fff;border-bottom:1px solid #eef2f7}
+.brand{display:flex;align-items:center;gap:12px}
+.logo{width:40px;height:40px;border-radius:8px;background:linear-gradient(135deg,#fff,#f1f5f9);display:flex;align-items:center;justify-content:center;font-size:18px}
+.title{font-weight:700;font-size:16px}
+.muted{color:var(--muted)}
+
+.layout{max-width:var(--max-width);margin:18px auto;display:grid;grid-template-columns:260px 1fr;gap:18px;padding:0 16px}
+.card{background:var(--card);border-radius:10px;padding:14px;box-shadow:var(--shadow);}
+.card.small{padding:10px}
+.sidebar .templates-list{max-height:60vh;overflow:auto;padding-right:6px}
+
+.nav{display:flex;flex-direction:column;gap:6px;margin-bottom:8px}
+.nav-item{background:transparent;border:0;padding:8px 10px;border-radius:8px;text-align:left;cursor:pointer}
+.nav-item.active{background:#eef6ff}
+
+.templates-list{display:flex;flex-direction:column;gap:8px}
+.tpl-card{border:1px solid #eef2ff;padding:8px;border-radius:8px;background:linear-gradient(180deg,#fff,#fbfdff)}
+.tpl-name{font-weight:600;margin-bottom:6px}
+.tpl-text{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#f8fafc;padding:8px;border-radius:6px;white-space:pre-wrap;margin:0}
+
+.content .input,.content .select{width:100%;padding:10px;border-radius:8px;border:1px solid #e6edf3}
+.textarea{width:100%;min-height:120px;padding:10px;border-radius:8px;border:1px solid #e6edf3;resize:vertical}
+.row{display:flex;align-items:center}
+.gap{gap:10px}
+.btn{padding:8px 12px;border-radius:8px;border:1px solid transparent;background:#f1f5f9;cursor:pointer}
+.btn.primary{background:var(--accent);color:#fff}
+.label{display:block;margin-top:10px;margin-bottom:6px;color:var(--muted)}
+.checkbox{display:flex;align-items:center;gap:8px}
+.result{background:#0f1724;color:#e6efff;padding:12px;border-radius:8px;margin-top:12px;white-space:pre-wrap}
+
+/* Modal */
+.modal{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(4,8,14,0.45);z-index:60}
+.modal.hidden{display:none}
+.modal-panel{width:90%;max-width:720px;background:var(--card);border-radius:12px;padding:18px;box-shadow:0 18px 40px rgba(2,6,23,0.25)}
+.modal-close{position:absolute;right:18px;top:18px;border:0;background:transparent;font-size:20px;cursor:pointer}
+.modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}
+
+/* Toast */
+.toast-wrap{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;gap:8px;z-index:80}
+.toast{padding:10px 14px;border-radius:8px;color:#fff;background:#111a2b;box-shadow:0 8px 24px rgba(2,6,23,0.32)}
+.toast.success{background:var(--success)}
+.toast.error{background:var(--danger)}
+
+/* Responsive */
+@media (max-width:900px){
+  .layout{grid-template-columns:1fr;padding:0 12px}
+  .sidebar{order:2}
+  .content{order:1}
+}
+
+/* Buttons editor */
+.components-list{display:flex;flex-direction:column;gap:8px;margin-top:8px}
+.btn-row.small{display:flex;gap:8px}
+.btn-row.small .input{flex:1;padding:8px}
+
+/* Preview & Test */
+.phone-mockup{width:280px;border-radius:18px;border:12px solid #e6eef8;background:#f8fbff;padding:12px;height:260px;overflow:auto}
+.preview-bubble{background:#e6f4ff;padding:10px;border-radius:12px;max-width:80%;margin-bottom:8px}
+.preview-btn{display:inline-block;padding:6px 10px;border-radius:18px;background:#fff;border:1px solid #e6eef8;margin-right:8px;margin-top:6px;font-size:0.95rem}
+.param-editor{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.param-input{padding:8px;border-radius:8px;border:1px solid #e6edf3}
+

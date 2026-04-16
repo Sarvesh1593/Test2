@@ -2,9 +2,15 @@ const express = require("express");
 const axios = require("axios");
 const { HfInference } = require("@huggingface/inference");
 // const { GoogleGenerativeAI } = require("@google/generative-ai");
+const fs = require("fs");
+const path = require("path");
 
 const app = express();
 app.use(express.json());
+app.use(express.static("public"));
+
+// Templates are now managed through Meta (WhatsApp) templates API.
+// Local template storage removed.
 
 // const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const hf = new HfInference(process.env.HUGGINGFACE_API_KEY);
@@ -292,8 +298,106 @@ async function sendMessage(to, text) {
         },
       },
     );
+    return { ok: true };
   } catch (err) {
     console.error("❌ Send error:", err.response?.data || err.message);
+    return { ok: false, error: err.response?.data || err.message };
+  }
+}
+
+// ─── Send WhatsApp Template Message (registered template on Meta) ───────
+async function sendTemplateMessage(
+  to,
+  templateName,
+  language = "en_US",
+  parameters = [],
+) {
+  try {
+    const body = {
+      messaging_product: "whatsapp",
+      to,
+      type: "template",
+      template: {
+        name: templateName,
+        language: { code: language },
+      },
+    };
+
+    // If there are body parameters, attach them as a single body component
+    if (Array.isArray(parameters) && parameters.length > 0) {
+      body.template.components = [
+        {
+          type: "body",
+          parameters: parameters.map((p) => ({
+            type: "text",
+            text: String(p),
+          })),
+        },
+      ];
+    }
+
+    await axios.post(
+      `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
+      body,
+      {
+        headers: {
+          Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+      },
+    );
+
+    return { ok: true };
+  } catch (err) {
+    console.error("❌ Template send error:", err.response?.data || err.message);
+    return { ok: false, error: err.response?.data || err.message };
+  }
+}
+
+// ─── Send Interactive Button Message (quick reply buttons) ─────────────
+async function sendInteractiveButtons(to, bodyText, buttons = []) {
+  try {
+    // limit to 3 buttons as per WhatsApp limits
+    const btns = (Array.isArray(buttons) ? buttons : [])
+      .filter((b) => b && b.title)
+      .slice(0, 3)
+      .map((b, idx) => ({
+        type: "reply",
+        reply: {
+          id: b.id || `btn_${idx + 1}`,
+          title: String(b.title).slice(0, 20),
+        },
+      }));
+
+    const body = {
+      messaging_product: "whatsapp",
+      to,
+      type: "interactive",
+      interactive: {
+        type: "button",
+        body: { text: bodyText || "" },
+        action: { buttons: btns },
+      },
+    };
+
+    await axios.post(
+      `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
+      body,
+      {
+        headers: {
+          Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+      },
+    );
+
+    return { ok: true };
+  } catch (err) {
+    console.error(
+      "❌ Interactive send error:",
+      err.response?.data || err.message,
+    );
+    return { ok: false, error: err.response?.data || err.message };
   }
 }
 
@@ -402,6 +506,141 @@ function trimHistory(history) {
   if (history.length > 20) history.splice(0, 2);
 }
 
+// ─── Templates API & Broadcast Endpoints ───────────────────────────────
+// Get approved message templates from Meta (WhatsApp Business Account).
+let cachedWabaId = process.env.WABA_ID || null;
+async function getWabaId() {
+  if (cachedWabaId) return cachedWabaId;
+  if (!PHONE_NUMBER_ID)
+    throw new Error("PHONE_NUMBER_ID is not configured in the environment");
+  if (!WHATSAPP_TOKEN) throw new Error("WHATSAPP_TOKEN is not configured");
+  const resp = await axios.get(
+    `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}`,
+    {
+      params: {
+        fields: "whatsapp_business_account",
+        access_token: WHATSAPP_TOKEN,
+      },
+    },
+  );
+  const waba = resp.data?.whatsapp_business_account;
+
+  console.log("WABA RESPONSE:", resp.data);
+  console.log("WABA ID:", waba?.id);
+  if (!waba || !waba.id)
+    throw new Error("Failed to resolve WhatsApp Business Account ID");
+  cachedWabaId = waba.id;
+  return cachedWabaId;
+}
+
+app.get("/meta-templates", async (req, res) => {
+  try {
+    if (!WHATSAPP_TOKEN)
+      return res.status(500).json({ error: "WHATSAPP_TOKEN not configured" });
+    const wabaId = await getWabaId();
+    const url = `https://graph.facebook.com/v19.0/${wabaId}/message_templates`;
+    const resp = await axios.get(url, {
+      params: {
+        access_token: WHATSAPP_TOKEN,
+        fields: "name,status,components",
+      },
+    });
+    const raw = Array.isArray(resp.data?.data) ? resp.data.data : [];
+    const normalized = raw.map((t) => {
+      let bodyText = null;
+      if (Array.isArray(t.components)) {
+        const body = t.components.find(
+          (c) => String(c.type || "").toLowerCase() === "body",
+        );
+        if (body) bodyText = body.text || body.body_text || null;
+      }
+      return {
+        id: t.id || t.name,
+        name: t.name,
+        status: t.status || null,
+        components: t.components || [],
+        body: bodyText,
+      };
+    });
+    res.json(normalized);
+  } catch (err) {
+    console.error(
+      "Failed to fetch meta templates:",
+      err.response?.data || err.message,
+    );
+    res.status(500).json({ error: err.response?.data || err.message });
+  }
+});
+
+app.get("/subscribers", (req, res) => {
+  res.json({
+    count: userSessions.size,
+    numbers: Array.from(userSessions.keys()),
+  });
+});
+app.post("/broadcast", async (req, res) => {
+  const {
+    metaTemplateName,
+    metaTemplateLanguage,
+    templateParameters,
+    message,
+    targets,
+    sendToAll,
+    interactiveButtons,
+  } = req.body || {};
+
+  let recipients = [];
+  if (sendToAll) recipients = Array.from(userSessions.keys());
+  else if (Array.isArray(targets) && targets.length) recipients = targets;
+  else return res.status(400).json({ error: "No targets specified" });
+
+  const results = [];
+
+  for (const to of recipients) {
+    try {
+      let r;
+      if (metaTemplateName) {
+        // Send registered WhatsApp template
+        r = await sendTemplateMessage(
+          to,
+          metaTemplateName,
+          metaTemplateLanguage || "en_US",
+          Array.isArray(templateParameters) ? templateParameters : [],
+        );
+      } else if (
+        Array.isArray(interactiveButtons) &&
+        interactiveButtons.length
+      ) {
+        if (!message) {
+          results.push({
+            to,
+            ok: false,
+            error: "Interactive messages require a message body",
+          });
+          continue;
+        }
+        r = await sendInteractiveButtons(to, message, interactiveButtons);
+      } else {
+        if (!message) {
+          results.push({ to, ok: false, error: "No message specified" });
+          continue;
+        }
+        r = await sendMessage(to, message);
+      }
+      results.push({ to, ok: !!r?.ok, error: r?.error });
+    } catch (err) {
+      results.push({ to, ok: false, error: err.message });
+    }
+  }
+
+  res.json({ requested: recipients.length, results });
+});
+
+// Simple admin UI route
+app.get("/admin", (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "admin.html"));
+});
+
 // ─── Health check ─────────────────────────────────────────────────────────
 app.get("/", (req, res) => {
   res.json({
@@ -410,5 +649,5 @@ app.get("/", (req, res) => {
   });
 });
 
-const PORT = process.env.PORT || 8000;
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 FitBot running on port ${PORT}`));
