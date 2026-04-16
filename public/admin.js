@@ -191,7 +191,7 @@ function updateTemplateStatus(idx) {
   if (!el) return;
   if (idx === null || idx === undefined || idx === "") {
     el.textContent = "Status: —";
-    if (lang) lang.value = "en_US";
+    if (lang) lang.value = "en_US" || "en";
     return;
   }
   const tpl = templatesCache[Number(idx)];
@@ -201,7 +201,7 @@ function updateTemplateStatus(idx) {
     return;
   }
   el.textContent = `Status: ${tpl.status || "-"}`;
-  if (lang) lang.value = tpl.language || "en_US";
+  if (lang) lang.value = tpl.language || "en_US" || "en";
 }
 
 async function previewBroadcast() {
@@ -252,7 +252,7 @@ async function doBroadcast(fromModal = false) {
     );
     const payload = {
       metaTemplateName: tpl.name,
-      metaTemplateLanguage: $id("templateLang")?.value || "en_US",
+      metaTemplateLanguage: $id("templateLang")?.value || "en_US" || "en",
       templateParameters: params,
       targets,
       sendToAll: sendAll,
