@@ -306,10 +306,12 @@ async function sendMessage(to, text) {
 }
 
 // ─── Send WhatsApp Template Message (registered template on Meta) ───────
+const lang =
+  metaTemplateLanguage === "en_US" ? "en" : metaTemplateLanguage || "en";
 async function sendTemplateMessage(
   to,
   templateName,
-  language = "en_US" || "en",
+  language = lang,
   parameters = [],
 ) {
   try {
@@ -595,7 +597,7 @@ app.post("/broadcast", async (req, res) => {
         r = await sendTemplateMessage(
           to,
           metaTemplateName,
-          metaTemplateLanguage || "en_US" || "en",
+          metaTemplateLanguage || lang,
           Array.isArray(templateParameters) ? templateParameters : [],
         );
       } else if (
