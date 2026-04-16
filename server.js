@@ -309,7 +309,7 @@ async function sendMessage(to, text) {
 async function sendTemplateMessage(
   to,
   templateName,
-  language = "en_US",
+  language = "en_US" || "en",
   parameters = [],
 ) {
   try {
