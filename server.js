@@ -595,7 +595,7 @@ app.post("/broadcast", async (req, res) => {
         r = await sendTemplateMessage(
           to,
           metaTemplateName,
-          metaTemplateLanguage || "en_US",
+          metaTemplateLanguage || "en_US" || "en",
           Array.isArray(templateParameters) ? templateParameters : [],
         );
       } else if (
