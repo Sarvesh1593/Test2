@@ -191,23 +191,17 @@ function updateTemplateStatus(idx) {
   if (!el) return;
   if (idx === null || idx === undefined || idx === "") {
     el.textContent = "Status: —";
-    if (lang) lang.value = "en_US" || "en";
+    if (lang) lang.value = "en_US";
     return;
   }
   const tpl = templatesCache[Number(idx)];
   if (!tpl) {
     el.textContent = "Status: —";
-    if (lang)
-      lang.value =
-        metaTemplateLanguage === "en_US" ? "en" : metaTemplateLanguage || "en";
+    if (lang) lang.value = "en_US";
     return;
   }
   el.textContent = `Status: ${tpl.status || "-"}`;
-  if (lang)
-    lang.value =
-      tpl.language || metaTemplateLanguage === "en_US"
-        ? "en"
-        : metaTemplateLanguage || "en";
+  if (lang) lang.value = tpl.language || "en_US";
 }
 
 async function previewBroadcast() {
@@ -258,10 +252,7 @@ async function doBroadcast(fromModal = false) {
     );
     const payload = {
       metaTemplateName: tpl.name,
-      metaTemplateLanguage:
-        $id("templateLang")?.value || metaTemplateLanguage === "en_US"
-          ? "en"
-          : metaTemplateLanguage || "en",
+      metaTemplateLanguage: $id("templateLang")?.value || "en_US",
       templateParameters: params,
       targets,
       sendToAll: sendAll,
@@ -299,10 +290,7 @@ async function saveAndTest() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         metaTemplateName: tpl.name,
-        metaTemplateLanguage:
-          $id("templateLang")?.value || metaTemplateLanguage === "en_US"
-            ? "en"
-            : metaTemplateLanguage || "en",
+        metaTemplateLanguage: $id("templateLang")?.value || "en_US",
         templateParameters: params,
         targets: [num],
       }),
