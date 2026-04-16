@@ -508,52 +508,39 @@ function trimHistory(history) {
 
 // ─── Templates API & Broadcast Endpoints ───────────────────────────────
 // Get approved message templates from Meta (WhatsApp Business Account).
-let cachedWabaId = process.env.WABA_ID || null;
-async function getWabaId() {
-  if (cachedWabaId) return cachedWabaId;
-  if (!PHONE_NUMBER_ID)
-    throw new Error("PHONE_NUMBER_ID is not configured in the environment");
-  if (!WHATSAPP_TOKEN) throw new Error("WHATSAPP_TOKEN is not configured");
-  const resp = await axios.get(
-    `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}`,
-    {
-      params: {
-        fields: "whatsapp_business_account",
-        access_token: WHATSAPP_TOKEN,
-      },
-    },
-  );
-  const waba = resp.data?.whatsapp_business_account;
-
-  console.log("WABA RESPONSE:", resp.data);
-  console.log("WABA ID:", waba?.id);
-  if (!waba || !waba.id)
-    throw new Error("Failed to resolve WhatsApp Business Account ID");
-  cachedWabaId = waba.id;
-  return cachedWabaId;
-}
-
 app.get("/meta-templates", async (req, res) => {
   try {
-    if (!WHATSAPP_TOKEN)
+    if (!WHATSAPP_TOKEN) {
       return res.status(500).json({ error: "WHATSAPP_TOKEN not configured" });
-    const wabaId = await getWabaId();
+    }
+
+    const wabaId = process.env.WABA_ID;
+
+    if (!wabaId) {
+      return res.status(500).json({ error: "WABA_ID not configured" });
+    }
+
     const url = `https://graph.facebook.com/v19.0/${wabaId}/message_templates`;
+
     const resp = await axios.get(url, {
       params: {
         access_token: WHATSAPP_TOKEN,
         fields: "name,status,components",
       },
     });
+
     const raw = Array.isArray(resp.data?.data) ? resp.data.data : [];
+
     const normalized = raw.map((t) => {
       let bodyText = null;
+
       if (Array.isArray(t.components)) {
         const body = t.components.find(
           (c) => String(c.type || "").toLowerCase() === "body",
         );
         if (body) bodyText = body.text || body.body_text || null;
       }
+
       return {
         id: t.id || t.name,
         name: t.name,
@@ -562,13 +549,17 @@ app.get("/meta-templates", async (req, res) => {
         body: bodyText,
       };
     });
+
     res.json(normalized);
   } catch (err) {
     console.error(
       "Failed to fetch meta templates:",
       err.response?.data || err.message,
     );
-    res.status(500).json({ error: err.response?.data || err.message });
+
+    res.status(500).json({
+      error: err.response?.data || err.message,
+    });
   }
 });
 
