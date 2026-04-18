@@ -1,7 +1,7 @@
 const express = require("express");
 const axios = require("axios");
-const { HfInference } = require("@huggingface/inference");
-// const { GoogleGenerativeAI } = require("@google/generative-ai");
+const OpenAI = require("openai");
+
 const fs = require("fs");
 const path = require("path");
 
@@ -13,7 +13,7 @@ app.use(express.static("public"));
 // Local template storage removed.
 
 // const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const hf = new HfInference(process.env.HUGGINGFACE_API_KEY);
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
@@ -201,8 +201,8 @@ async function handleImage(from, imageId, caption, history) {
       role: "user",
       content: [
         {
-          type: "image",
-          source: { type: "base64", media_type: mimeType, data: base64 },
+          type: "image_url",
+          image_url: { url: `data:${mimeType};base64,${base64}` },
         },
         { type: "text", text: userText },
       ],
@@ -267,22 +267,15 @@ async function handleImage(from, imageId, caption, history) {
 
 async function callGenAI(history) {
   try {
-    // Convert history to a text prompt
-    let prompt = SYSTEM_PROMPT + "\n\n";
-    history.forEach((msg) => {
-      prompt += `${msg.role === "user" ? "User" : "Assistant"}: ${msg.content}\n`;
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o",
+      max_tokens: 1024,
+      messages: [{ role: "system", content: SYSTEM_PROMPT }, ...history],
     });
-
-    const response = await hf.textGeneration({
-      model: "google/flan-t5-large",
-      inputs: prompt,
-      parameters: { max_new_tokens: 500 },
-    });
-
-    return response.generated_text;
+    return response.choices[0].message.content;
   } catch (err) {
-    console.error("❌ Hugging Face error:", err.message);
-    return `⚠️ I had a moment! Please try again — I'm here to help 💪 ${err.message}`;
+    console.error("❌ OpenAI error:", err.message);
+    return "⚠️ I had a moment! Please try again 💪";
   }
 }
 // ─── Send WhatsApp Text ───────────────────────────────────────────────────
