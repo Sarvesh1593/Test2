@@ -64,8 +64,9 @@ function defaultProfile() {
     flow: null,
     step: 0,
     history: [],
-    createdAt: new Date(), // ✅ NEW: track when user first messaged
-    updatedAt: new Date(), // ✅ NEW: track last activity
+    welcomed: false, // ← tracks if Welcome screen was already sent
+    createdAt: new Date(),
+    updatedAt: new Date(),
   };
 }
 
@@ -189,17 +190,13 @@ app.post("/webhook", async (req, res) => {
 
     console.log(`📩 From: ${from} | Type: ${msgType}`);
 
-    // ✅ CHANGED: await needed because getProfile is now async
     const profile = await getProfile(from);
 
-    // ── First-time user ──
-    if (
-      !profile.flow &&
-      !profile.dietPlan &&
-      !profile.workoutPlan &&
-      profile.history.length === 0
-    ) {
-      await sendWelcome(from);
+    // ── Brand-new user: show Welcome ONCE for any message type ──
+    // sendWelcome() sets profile.welcomed = true so this never fires again.
+    // After that, all buttons work immediately on the very first tap.
+    if (!profile.welcomed) {
+      await sendWelcome(from, profile);
       return;
     }
 
@@ -245,7 +242,7 @@ async function handleText(from, text, profile) {
   if (["hi", "hello", "hey", "menu"].includes(lower)) {
     profile.flow = null;
     profile.step = 0;
-    await sendWelcome(from);
+    await sendWelcome(from, profile);
     return;
   }
 
@@ -389,7 +386,7 @@ async function handleInteractive(from, id, label, profile) {
     case "back_menu":
       profile.flow = null;
       profile.step = 0;
-      await sendWelcome(from);
+      await sendWelcome(from, profile);
       break;
 
     default:
@@ -738,7 +735,9 @@ async function callGPT(messages, systemPrompt) {
 }
 
 // ─── Send Welcome ──────────────────────────────────────────────────────────────
-async function sendWelcome(from) {
+// Accepts profile so we can set welcomed = true and save it.
+// This ensures Welcome is only ever sent ONCE per user.
+async function sendWelcome(from, profile) {
   await sendMessage(
     from,
     `💪 *Welcome to FitBot — Your AI Fitness Coach!*\n\n` +
@@ -751,6 +750,12 @@ async function sendWelcome(from) {
       `Choose an option below 👇`,
   );
   await sendMainMenu(from);
+
+  // Mark welcomed so buttons work immediately on the next tap
+  if (profile) {
+    profile.welcomed = true;
+    await saveProfile(from, profile);
+  }
 }
 
 // ─── SEND MAIN MENU ────────────────────────────────────────────────────────────
