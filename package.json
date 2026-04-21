@@ -14,6 +14,7 @@
     "axios": "^1.15.0",
     "dotenv": "^17.4.1",
     "express": "^4.22.1",
+    "mongodb": "^7.2.0",
     "openai": "^6.34.0"
   },
   "devDependencies": {

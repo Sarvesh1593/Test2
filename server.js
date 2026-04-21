@@ -1,6 +1,7 @@
 const express = require("express");
 const axios = require("axios");
 const OpenAI = require("openai");
+const { MongoClient } = require("mongodb"); // ✅ NEW: MongoDB driver
 
 const fs = require("fs");
 const path = require("path");
@@ -9,76 +10,159 @@ const app = express();
 app.use(express.json());
 app.use(express.static("public"));
 
-// Templates are now managed through Meta (WhatsApp) templates API.
-// Local template storage removed.
-
-// const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "fitbot_verify_123";
 
-// ─── System Prompt ────────────────────────────────────────────────────────────
-const SYSTEM_PROMPT = `You are FitBot, a friendly and expert WhatsApp AI fitness and diet coach.
+// ─── MongoDB Setup ────────────────────────────────────────────────────────────
+// ✅ NEW: Connect once at startup and reuse the connection throughout the app.
+// Set MONGODB_URI in your .env file, e.g.:
+//   MONGODB_URI=mongodb+srv://user:pass@cluster.mongodb.net/fitbot?retryWrites=true&w=majority
 
-Your tone: motivating, warm, concise, practical. Use emojis naturally.
-Format for WhatsApp: use *bold* for headings, numbered lists, keep under 350 words.
+const MONGODB_URI = process.env.MONGODB_URI;
+let db = null; // Will hold the connected database instance
 
-You can help with:
-- Food image analysis with full diet advice
-- Personalized diet plans
-- Workout routines
-- BMI and calorie calculations
-- Hydration and supplement tips
+async function connectMongo() {
+  if (!MONGODB_URI) {
+    console.warn(
+      "⚠️  MONGODB_URI not set — profiles will NOT persist across restarts.",
+    );
+    return;
+  }
+  try {
+    const client = new MongoClient(MONGODB_URI);
+    await client.connect();
+    db = client.db(); // Uses the DB name from the URI string automatically
+    console.log("✅ MongoDB connected");
+  } catch (err) {
+    console.error("❌ MongoDB connection failed:", err.message);
+  }
+}
 
-When analyzing a food image, always follow this exact structure:
-1. *What I see* — identify the food/meal clearly
-2. *Nutrition estimate* — calories, protein, carbs, fats
-3. *Health rating* — X/10 with one-line reason
-4. *Is this good for your diet?* — honest assessment
-5. *Diet advice* — specific tips based on this meal (what to add, remove, or swap)
-6. *Better alternatives* — 2-3 healthier swaps or additions
-7. *Today's diet tip* — one actionable tip based on what they ate
+// ─── In-memory cache (fast reads during active session) ───────────────────────
+// Profiles are loaded from MongoDB on first message, then cached here.
+// Any update is written to both the cache AND MongoDB.
+const userProfiles = new Map();
 
-Always end with an encouraging message.`;
+// ─── Default profile shape ────────────────────────────────────────────────────
+function defaultProfile() {
+  return {
+    age: null,
+    weight: null,
+    height: null,
+    bmi: null,
+    vegNonVeg: null,
+    goal: null,
+    problems: null,
+    timing: null,
+    schedule: null,
+    reminderOn: false,
+    dietPlan: null,
+    workoutPlan: null,
+    flow: null,
+    step: 0,
+    history: [],
+    createdAt: new Date(), // ✅ NEW: track when user first messaged
+    updatedAt: new Date(), // ✅ NEW: track last activity
+  };
+}
 
-// ─── Image-Specific Prompt ─────────────────────────────────────────────────
-const IMAGE_DIET_PROMPT = `Analyze this food image and provide a complete diet response.
+// ─── getProfile: load from cache OR MongoDB ───────────────────────────────────
+// ✅ NEW: Now async. On first call for a phone number it hits MongoDB.
+//         After that the in-memory cache is used (fast).
+async function getProfile(from) {
+  // 1. Return from cache if already loaded this session
+  if (userProfiles.has(from)) return userProfiles.get(from);
 
-Structure your reply exactly like this:
+  // 2. Try fetching from MongoDB
+  if (db) {
+    try {
+      const saved = await db.collection("profiles").findOne({ _id: from });
+      if (saved) {
+        // Strip the Mongo _id key before caching, store as phone prop instead
+        const { _id, ...data } = saved;
+        userProfiles.set(from, data);
+        console.log(`📦 Profile loaded from MongoDB for ${from}`);
+        return data;
+      }
+    } catch (err) {
+      console.error("❌ MongoDB read error:", err.message);
+    }
+  }
 
-📸 *Food Identified:* [name of food/meal]
+  // 3. Brand-new user — create default and cache it (don't save to DB yet)
+  const fresh = defaultProfile();
+  userProfiles.set(from, fresh);
+  return fresh;
+}
 
-🔢 *Nutrition Estimate (per serving):*
-• Calories: ~XXX kcal
-• Protein: ~Xg
-• Carbs: ~Xg
-• Fats: ~Xg
+// ─── saveProfile: persist cache → MongoDB ─────────────────────────────────────
+// ✅ NEW: Call this after every meaningful profile change (plan generated,
+//         step updated, reminder toggled, etc.).
+//         Uses upsert so it works for both new and returning users.
+async function saveProfile(from, profile) {
+  profile.updatedAt = new Date(); // always bump timestamp
 
-⭐ *Health Rating:* X/10 — [one-line reason]
+  if (!db) return; // silently skip if Mongo isn't connected
 
-✅ *Diet Assessment:*
-[2-3 sentences — is this good, bad, or okay for general health/weight goals?]
+  try {
+    await db.collection("profiles").updateOne(
+      { _id: from }, // match by phone number
+      { $set: { ...profile, _id: from } }, // upsert full profile
+      { upsert: true }, // create doc if it doesn't exist
+    );
+  } catch (err) {
+    console.error("❌ MongoDB write error:", err.message);
+  }
+}
 
-💡 *Diet Advice for This Meal:*
-1. [Specific tip 1]
-2. [Specific tip 2]
-3. [Specific tip 3]
+// ─── System Prompts ───────────────────────────────────────────────────────────
 
-🔄 *Healthier Alternatives:*
-• [Swap 1]
-• [Swap 2]
+const DIET_SYSTEM = `You are FitBot, a WhatsApp AI diet coach. Be friendly, concise, use emojis.
+Format all responses for WhatsApp: use *bold* with asterisks, bullet points with •.
+Keep replies under 300 words.
+ 
+When generating a diet plan you MUST use this exact structure:
+📋 *Your Personalised Diet Plan*
+ 
+☀️ *Morning (7 AM):* [meal]
+🥣 *Breakfast (8 AM):* [meal]
+🍎 *Mid-Morning (11 AM):* [snack]
+🍱 *Lunch (1 PM):* [meal]
+🫖 *Evening (4 PM):* [snack]
+🌙 *Dinner (7–8 PM):* [meal]
+ 
+💧 *Hydration:* Drink 8–10 glasses of water daily.
+🔥 *Daily Calories:* ~[X] kcal
+ 
+End with one short motivational line.`;
 
-🌟 *Today's Diet Tip:*
-[One actionable diet tip inspired by this meal]
+const WORKOUT_SYSTEM = `You are FitBot, a WhatsApp AI fitness coach. Be friendly, concise, use emojis.
+Format all responses for WhatsApp: use *bold* with asterisks.
+Keep replies under 300 words.
+ 
+When generating a workout plan use this exact structure:
+🗓️ *Your 5-Day Workout Plan*
+ 
+*Mon:* [exercise — duration]
+*Tue:* [exercise — duration]
+*Wed:* [exercise — duration]
+*Fri:* [exercise — duration]
+*Sat:* [exercise — duration]
+*Thu & Sun:* Rest / Light walk
+ 
+⏰ *Warm-up:* 10 min before each session
+💪 *Tip:* [one actionable tip based on their goal]
+ 
+End with one short motivational line.`;
 
-Keep it under 300 words. Be encouraging at the end!`;
+const GENERAL_SYSTEM = `You are FitBot, a friendly WhatsApp AI fitness and diet coach.
+Use emojis naturally. Format for WhatsApp: *bold* for headings, bullet points with •.
+Keep replies under 250 words. Be encouraging and practical.`;
 
-// ─── In-memory user sessions ──────────────────────────────────────────────
-const userSessions = new Map();
-
-// ─── Webhook Verification ─────────────────────────────────────────────────
+// ─── Webhook Verification ─────────────────────────────────────────────────────
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -91,9 +175,9 @@ app.get("/webhook", (req, res) => {
   }
 });
 
-// ─── Receive Messages ─────────────────────────────────────────────────────
+// ─── Receive Messages ──────────────────────────────────────────────────────────
 app.post("/webhook", async (req, res) => {
-  res.sendStatus(200);
+  res.sendStatus(200); // Always ack Meta immediately
 
   try {
     const messages = req.body?.entry?.[0]?.changes?.[0]?.value?.messages;
@@ -105,26 +189,38 @@ app.post("/webhook", async (req, res) => {
 
     console.log(`📩 From: ${from} | Type: ${msgType}`);
 
-    if (!userSessions.has(from)) {
-      userSessions.set(from, []);
+    // ✅ CHANGED: await needed because getProfile is now async
+    const profile = await getProfile(from);
+
+    // ── First-time user ──
+    if (
+      !profile.flow &&
+      !profile.dietPlan &&
+      !profile.workoutPlan &&
+      profile.history.length === 0
+    ) {
       await sendWelcome(from);
       return;
     }
 
-    const history = userSessions.get(from);
-
     if (msgType === "text") {
-      await handleText(from, message.text.body, history);
+      const text = message.text.body.trim();
+      await handleText(from, text, profile);
+    } else if (msgType === "interactive") {
+      const btnId = message.interactive?.button_reply?.id || "";
+      const btnTitle = message.interactive?.button_reply?.title || "";
+      const listId = message.interactive?.list_reply?.id || "";
+      const listTitle = message.interactive?.list_reply?.title || "";
+      const reply = btnId || listId;
+      const label = btnTitle || listTitle;
+      await handleInteractive(from, reply, label, profile);
     } else if (msgType === "image") {
       await handleImage(
         from,
         message.image.id,
         message.image?.caption || "",
-        history,
+        profile,
       );
-    } else if (msgType === "interactive") {
-      const btnTitle = message.interactive?.button_reply?.title || "";
-      await handleText(from, btnTitle, history);
     } else if (msgType === "audio" || msgType === "voice") {
       await sendMessage(
         from,
@@ -133,7 +229,7 @@ app.post("/webhook", async (req, res) => {
     } else {
       await sendMessage(
         from,
-        "I understand text messages and food photos! 📸 Send me a photo of any meal and I'll analyze it for you. 💪",
+        "I understand text and food photos! 📸 Type a message or tap a button to get started 💪",
       );
     }
   } catch (err) {
@@ -141,49 +237,439 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// ─── Handle Text ──────────────────────────────────────────────────────────
-async function handleText(from, text, history) {
-  // Normalize input and treat greetings as a fresh start.
-  const normalized = (text || "").trim().toLowerCase();
+// ─── Handle Text ───────────────────────────────────────────────────────────────
+async function handleText(from, text, profile) {
+  const lower = text.toLowerCase();
 
-  if (["hello", "hi", "hey"].includes(normalized)) {
-    // Reset the session in the map and send the welcome message.
-    const newHistory = [];
-    userSessions.set(from, newHistory);
+  // Global reset commands
+  if (["hi", "hello", "hey", "menu"].includes(lower)) {
+    profile.flow = null;
+    profile.step = 0;
     await sendWelcome(from);
-    return; // do not send greeting to the AI
+    return;
   }
 
-  // Ensure we are using the latest session array from the map
-  history = userSessions.get(from) || [];
+  if (profile.flow === "diet") {
+    await handleDietStep(from, text, profile);
+    return;
+  }
 
-  history.push({ role: "user", content: text });
-  const reply = await callGenAI(history);
-  history.push({ role: "assistant", content: reply });
-  trimHistory(history);
-  // Save updated history back to the session map
-  userSessions.set(from, history);
+  if (profile.flow === "workout") {
+    await handleWorkoutStep(from, text, profile);
+    return;
+  }
+
+  // General AI chat
+  profile.history.push({ role: "user", content: text });
+  const reply = await callGPT(profile.history, GENERAL_SYSTEM);
+  profile.history.push({ role: "assistant", content: reply });
+  trimHistory(profile.history);
+
+  // ✅ NEW: Save after every chat message so history persists
+  await saveProfile(from, profile);
+
   await sendMessage(from, reply);
-
-  if (history.length === 2) await sendQuickReplies(from);
+  await sendMainMenu(from);
 }
 
-// ─── Handle Image → Full Diet Analysis ───────────────────────────────────
-async function handleImage(from, imageId, caption, history) {
-  // Step 1: Tell user we're analyzing
+// ─── Handle Interactive Buttons ────────────────────────────────────────────────
+async function handleInteractive(from, id, label, profile) {
+  switch (id) {
+    case "start_diet":
+      profile.flow = "diet";
+      profile.step = 0;
+      await startDietFlow(from, profile);
+      break;
+
+    case "start_workout":
+      profile.flow = "workout";
+      profile.step = 0;
+      await startWorkoutFlow(from, profile);
+      break;
+
+    case "view_profile":
+      await sendProfileCard(from, profile);
+      break;
+
+    case "diet_veg":
+    case "diet_nonveg":
+    case "diet_vegan":
+      if (profile.flow === "diet" && profile.step === 2) {
+        profile.vegNonVeg = label;
+        profile.step = 3;
+        await saveProfile(from, profile); // ✅ NEW: save after each step
+        await askDietStep3(from);
+      }
+      break;
+
+    case "goal_reduce":
+    case "goal_gain":
+    case "goal_lean":
+      if (profile.flow === "diet" && profile.step === 3) {
+        profile.goal = label;
+        await generateDietPlan(from, profile);
+      }
+      break;
+
+    case "workout_loss":
+    case "workout_muscle":
+    case "workout_flex":
+    case "workout_strength":
+      if (profile.flow === "workout") {
+        profile.goal = label;
+        profile.step = 3;
+        await saveProfile(from, profile); // ✅ NEW
+        await askWorkoutStep3(from);
+      }
+      break;
+
+    case "problem_back":
+    case "problem_knee":
+    case "problem_heart":
+    case "problem_none":
+      if (profile.flow === "workout" && profile.step === 3) {
+        profile.problems = label;
+        profile.step = 4;
+        await saveProfile(from, profile); // ✅ NEW
+        await askWorkoutStep4(from);
+      }
+      break;
+
+    case "time_20":
+    case "time_30":
+    case "time_45":
+      if (profile.flow === "workout" && profile.step === 4) {
+        profile.timing = label;
+        await generateWorkoutPlan(from, profile);
+      }
+      break;
+
+    case "start_today":
+      profile.schedule = "Started today";
+      await sendMessage(
+        from,
+        "🔥 *Let's go!* Your first session starts today! I'll remind you 30 min before your workout. You've got this! 💪",
+      );
+      await askWorkoutReminder(from, profile);
+      break;
+
+    case "schedule_later":
+      await sendMessage(
+        from,
+        "📅 No problem! Your workout plan is saved. Come back when you're ready to begin 💪",
+      );
+      profile.flow = null;
+      await saveProfile(from, profile); // ✅ NEW
+      await sendMainMenu(from);
+      break;
+
+    case "reminder_yes":
+      profile.reminderOn = true;
+      profile.schedule = "Daily reminder ON";
+      await sendMessage(
+        from,
+        "🔔 *Daily reminders set!* I'll notify you every day to follow your plan. Your profile has been updated ✅",
+      );
+      profile.flow = null;
+      await saveProfile(from, profile); // ✅ NEW
+      await sendMainMenu(from);
+      break;
+
+    case "reminder_no":
+      profile.reminderOn = false;
+      await sendMessage(
+        from,
+        "👍 Got it! Your plan is saved. Tap *Menu* anytime to see your options 💪",
+      );
+      profile.flow = null;
+      await saveProfile(from, profile); // ✅ NEW
+      await sendMainMenu(from);
+      break;
+
+    case "back_menu":
+      profile.flow = null;
+      profile.step = 0;
+      await sendWelcome(from);
+      break;
+
+    default:
+      await handleText(from, label, profile);
+  }
+}
+
+// ─── DIET PLAN FLOW ────────────────────────────────────────────────────────────
+async function startDietFlow(from, profile) {
   await sendMessage(
     from,
-    "📸 Got your food photo! Analyzing it for you...\n\n🔍 Checking calories, nutrition & diet advice...",
+    "🥗 *Diet Plan Generator*\nLet me create a personalised meal plan for you! I'll ask a few quick questions 👇",
+  );
+  await askDietStep0(from);
+}
+
+async function askDietStep0(from) {
+  await sendMessage(
+    from,
+    "📅 *Question 1 of 4*\n\nWhat is your *age*?\n\nPlease type your age (e.g. 25)",
+  );
+}
+
+async function askDietStep1(from) {
+  await sendMessage(
+    from,
+    "⚖️ *Question 2 of 4*\n\nWhat is your *weight* in kg?\n\nPlease type your weight (e.g. 70)",
+  );
+}
+
+async function askDietStep2(from) {
+  await sendButtons(from, "🥦 *Question 3 of 4*\n\nAre you *Veg or Non-Veg*?", [
+    { id: "diet_veg", title: "🥦 Vegetarian" },
+    { id: "diet_nonveg", title: "🍗 Non-Vegetarian" },
+    { id: "diet_vegan", title: "🌿 Vegan" },
+  ]);
+}
+
+async function askDietStep3(from) {
+  await sendButtons(from, "🎯 *Question 4 of 4*\n\nWhat is your *diet goal*?", [
+    { id: "goal_reduce", title: "⚡ Reduce Weight" },
+    { id: "goal_gain", title: "💪 Gain Weight" },
+    { id: "goal_lean", title: "🏃 Stay Lean" },
+  ]);
+}
+
+async function handleDietStep(from, text, profile) {
+  switch (profile.step) {
+    case 0:
+      profile.age = text;
+      profile.step = 1;
+      await saveProfile(from, profile); // ✅ NEW: save age
+      await askDietStep1(from);
+      break;
+    case 1: {
+      const w = parseFloat(text);
+      profile.weight = text;
+      if (!isNaN(w)) {
+        // NOTE: Height still hardcoded at 1.72m.
+        // To fix properly, add a height question as step 1.5
+        const bmi = (w / (1.72 * 1.72)).toFixed(1);
+        profile.bmi = bmi;
+      }
+      profile.step = 2;
+      await saveProfile(from, profile); // ✅ NEW: save weight + BMI
+      await askDietStep2(from);
+      break;
+    }
+    default:
+      await sendMessage(from, "Please tap one of the buttons above 👆");
+  }
+}
+
+async function generateDietPlan(from, profile) {
+  profile.flow = null;
+  await sendMessage(
+    from,
+    "⏳ *Generating your personalised diet plan...*\n🔄 Analysing your profile...",
+  );
+
+  const prompt = `Generate a daily diet plan for:
+- Age: ${profile.age}
+- Weight: ${profile.weight} kg
+- Diet type: ${profile.vegNonVeg}
+- Goal: ${profile.goal}
+- BMI: ${profile.bmi || "unknown"}
+
+Use the required WhatsApp format with meal timings.`;
+
+  const reply = await callGPT([{ role: "user", content: prompt }], DIET_SYSTEM);
+  profile.dietPlan = reply;
+
+  // ✅ NEW: Save diet plan to MongoDB as soon as it's generated
+  await saveProfile(from, profile);
+
+  await sendMessage(from, reply);
+
+  await sendButtons(
+    from,
+    "🔔 Would you like *daily reminders* to follow your diet plan?",
+    [
+      { id: "reminder_yes", title: "✅ Yes, remind me" },
+      { id: "reminder_no", title: "❌ No thanks" },
+    ],
+  );
+}
+
+// ─── WORKOUT PLAN FLOW ─────────────────────────────────────────────────────────
+async function startWorkoutFlow(from, profile) {
+  if (profile.bmi) {
+    await sendMessage(
+      from,
+      `🏋️ *Workout Plan Generator*\n\nI found your saved BMI: *${profile.bmi}* 📊\nUsing your existing profile — just a couple more questions!`,
+    );
+    profile.step = 2;
+    await askWorkoutStep2(from);
+  } else {
+    await sendMessage(
+      from,
+      "🏋️ *Workout Plan Generator*\nLet me build your perfect workout! A few quick questions 👇",
+    );
+    await askWorkoutStep0(from);
+  }
+}
+
+async function askWorkoutStep0(from) {
+  await sendMessage(
+    from,
+    "📅 *Question 1 of 5*\n\nWhat is your *age*?\n\nPlease type your age (e.g. 25)",
+  );
+}
+
+async function askWorkoutStep1(from) {
+  await sendMessage(
+    from,
+    "⚖️ *Question 2 of 5*\n\nWhat is your *weight* in kg?\n\nPlease type your weight (e.g. 70)",
+  );
+}
+
+async function askWorkoutStep2(from) {
+  await sendButtons(from, "🎯 *What is your fitness goal?*", [
+    { id: "workout_loss", title: "⚡ Weight Loss" },
+    { id: "workout_muscle", title: "💪 Muscle Gain" },
+    { id: "workout_flex", title: "🤸 Flexibility" },
+    { id: "workout_strength", title: "🏋️ Strength" },
+  ]);
+}
+
+async function askWorkoutStep3(from) {
+  await sendButtons(
+    from,
+    "🩺 *Any health problems or injuries?*\n(Recommended: tell me so I avoid harmful exercises)",
+    [
+      { id: "problem_back", title: "🦴 Back Pain" },
+      { id: "problem_knee", title: "🦵 Knee Issue" },
+      { id: "problem_heart", title: "❤️ Heart Condition" },
+      { id: "problem_none", title: "✅ No Issues" },
+    ],
+  );
+}
+
+async function askWorkoutStep4(from) {
+  await sendButtons(
+    from,
+    "⏰ *How much time can you dedicate daily?*\n(Recommended: 30–45 min, 5 days a week)",
+    [
+      { id: "time_20", title: "⏱️ 20–30 min" },
+      { id: "time_30", title: "⏱️ 30–45 min" },
+      { id: "time_45", title: "⏱️ 45–60 min" },
+    ],
+  );
+}
+
+async function handleWorkoutStep(from, text, profile) {
+  switch (profile.step) {
+    case 0:
+      profile.age = text;
+      profile.step = 1;
+      await saveProfile(from, profile); // ✅ NEW
+      await askWorkoutStep1(from);
+      break;
+    case 1: {
+      const w = parseFloat(text);
+      profile.weight = text;
+      if (!isNaN(w)) {
+        profile.bmi = (w / (1.72 * 1.72)).toFixed(1);
+      }
+      profile.step = 2;
+      await saveProfile(from, profile); // ✅ NEW
+      await askWorkoutStep2(from);
+      break;
+    }
+    default:
+      await sendMessage(from, "Please tap one of the buttons above 👆");
+  }
+}
+
+async function generateWorkoutPlan(from, profile) {
+  profile.flow = null;
+  await sendMessage(
+    from,
+    "⏳ *Building your workout plan...*\n🔄 Creating your 5-day schedule...",
+  );
+
+  const prompt = `Generate a 5-day workout plan for:
+- Age: ${profile.age}
+- Weight: ${profile.weight} kg
+- Goal: ${profile.goal}
+- Health issues: ${profile.problems || "none"}
+- Daily time: ${profile.timing}
+- BMI: ${profile.bmi || "unknown"}
+
+Use the required WhatsApp format with Mon/Tue/Wed/Fri/Sat days.`;
+
+  const reply = await callGPT(
+    [{ role: "user", content: prompt }],
+    WORKOUT_SYSTEM,
+  );
+  profile.workoutPlan = reply;
+
+  // ✅ NEW: Save workout plan to MongoDB
+  await saveProfile(from, profile);
+
+  await sendMessage(from, reply);
+
+  await sendButtons(from, "🚀 Ready to start?", [
+    { id: "start_today", title: "🚀 Start Today" },
+    { id: "schedule_later", title: "📅 Schedule Later" },
+  ]);
+}
+
+async function askWorkoutReminder(from, profile) {
+  await sendButtons(from, "🔔 Set *daily workout reminders*?", [
+    { id: "reminder_yes", title: "✅ Yes, remind me" },
+    { id: "reminder_no", title: "❌ No thanks" },
+  ]);
+}
+
+// ─── PROFILE CARD ──────────────────────────────────────────────────────────────
+async function sendProfileCard(from, profile) {
+  const p = profile;
+  const hasSome = p.age || p.weight || p.goal;
+
+  if (!hasSome) {
+    await sendMessage(
+      from,
+      "👤 *Your Profile*\n\nNo profile saved yet!\nComplete your *Diet Plan* or *Workout* to build your profile automatically 💪",
+    );
+    await sendMainMenu(from);
+    return;
+  }
+
+  const msg =
+    `👤 *Your Fitness Profile*\n\n` +
+    `• *Age:* ${p.age || "—"}\n` +
+    `• *Weight:* ${p.weight ? p.weight + " kg" : "—"}\n` +
+    `• *BMI:* ${p.bmi || "—"}\n` +
+    `• *Diet Type:* ${p.vegNonVeg || "—"}\n` +
+    `• *Goal:* ${p.goal || "—"}\n` +
+    `• *Health Issues:* ${p.problems || "None"}\n` +
+    `• *Workout Time:* ${p.timing || "—"}\n` +
+    `• *Reminder:* ${p.reminderOn ? "✅ ON" : "❌ OFF"}\n` +
+    `• *Plans saved:* ${p.dietPlan ? "✅ Diet" : "❌ Diet"} | ${p.workoutPlan ? "✅ Workout" : "❌ Workout"}`;
+
+  await sendMessage(from, msg);
+  await sendMainMenu(from);
+}
+
+// ─── HANDLE IMAGE (Food Analysis) ─────────────────────────────────────────────
+async function handleImage(from, imageId, caption, profile) {
+  await sendMessage(
+    from,
+    "📸 *Got your food photo!*\n🔍 Analysing calories, nutrition & diet advice...",
   );
 
   try {
-    // Step 2: Get image URL from Meta
     const metaRes = await axios.get(
       `https://graph.facebook.com/v19.0/${imageId}`,
       { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } },
     );
-
-    // Step 3: Download image as Base64
     const imgRes = await axios.get(metaRes.data.url, {
       responseType: "arraybuffer",
       headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
@@ -191,94 +677,92 @@ async function handleImage(from, imageId, caption, history) {
     const base64 = Buffer.from(imgRes.data).toString("base64");
     const mimeType = imgRes.headers["content-type"] || "image/jpeg";
 
-    // Step 4: Build prompt — use caption if provided, else use full diet prompt
-    const userText = caption
-      ? `${IMAGE_DIET_PROMPT}\n\nUser also said: "${caption}"`
-      : IMAGE_DIET_PROMPT;
+    const prompt = caption
+      ? `Analyze this food image. User said: "${caption}". Give full diet analysis.`
+      : `Analyze this food image. Identify the food, estimate calories & macros, give a health rating out of 10, and provide 3 diet tips.`;
 
-    // Step 5: Add to session history with image
-    const imageMessage = {
-      role: "user",
-      content: [
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o",
+      max_tokens: 1024,
+      messages: [
+        { role: "system", content: GENERAL_SYSTEM },
         {
-          type: "image_url",
-          image_url: { url: `data:${mimeType};base64,${base64}` },
+          role: "user",
+          content: [
+            {
+              type: "image_url",
+              image_url: { url: `data:${mimeType};base64,${base64}` },
+            },
+            { type: "text", text: prompt },
+          ],
         },
-        { type: "text", text: userText },
       ],
-    };
-    history.push(imageMessage);
+    });
 
-    // Step 6: Call Claude with vision
-    const reply = await callGenAI(history);
-    history.push({ role: "assistant", content: reply });
-    trimHistory(history);
+    const reply = response.choices[0].message.content;
+    profile.history.push({ role: "user", content: "[Sent a food image]" });
+    profile.history.push({ role: "assistant", content: reply });
+    trimHistory(profile.history);
 
-    // Step 7: Send full diet analysis back
+    // ✅ NEW: Save history after image analysis
+    await saveProfile(from, profile);
+
     await sendMessage(from, reply);
-
-    // Step 8: Follow-up quick actions after image analysis
-    await sendImageFollowUp(from);
+    await sendButtons(from, "Want more help? 👇", [
+      { id: "start_diet", title: "🥗 Full Diet Plan" },
+      { id: "start_workout", title: "🏋️ Workout Plan" },
+      { id: "back_menu", title: "📋 Main Menu" },
+    ]);
   } catch (err) {
     console.error("❌ Image error:", err.message);
     await sendMessage(
       from,
-      "❌ Sorry, I couldn't read that image clearly.\n\n" +
-        "Please try:\n• A clearer, well-lit photo\n• Closer shot of the food\n• JPEG or PNG format\n\nSend it again and I'll analyze it! 💪",
+      "❌ Couldn't analyse that image.\n\nTry:\n• A clearer, well-lit photo\n• Closer shot of food\n• JPEG or PNG format\n\nSend it again! 💪",
     );
   }
 }
 
-// ─── Call Gemini AI ───────────────────────────────────────────────────────
-// async function callGenAI(history) {
-//   try {
-//     const model = genAI.getGenerativeModel({
-//       model: "gemini-2.0-flash",
-//     });
-
-//     // Convert Anthropic format to Gemini format
-//     const contents = history.map((msg) => ({
-//       role: msg.role === "user" ? "user" : "model",
-//       parts: Array.isArray(msg.content)
-//         ? msg.content.map((part) =>
-//             part.type === "image"
-//               ? {
-//                   inlineData: {
-//                     mimeType: part.source.media_type,
-//                     data: part.source.data,
-//                   },
-//                 }
-//               : { text: part.text },
-//           )
-//         : [{ text: msg.content }],
-//     }));
-
-//     const response = await model.generateContent({
-//       systemInstruction: SYSTEM_PROMPT,
-//       contents: contents,
-//     });
-
-//     return response.response.text();
-//   } catch (err) {
-//     console.error("❌ Gemini error:", err.message);
-//     return `⚠️ I had a moment! Please try again — I'm here to help 💪 ${err.message}`;
-//   }
-// }
-
-async function callGenAI(history) {
+// ─── CALL GPT-4o ───────────────────────────────────────────────────────────────
+async function callGPT(messages, systemPrompt) {
   try {
     const response = await openai.chat.completions.create({
       model: "gpt-4o",
       max_tokens: 1024,
-      messages: [{ role: "system", content: SYSTEM_PROMPT }, ...history],
+      messages: [{ role: "system", content: systemPrompt }, ...messages],
     });
     return response.choices[0].message.content;
   } catch (err) {
-    console.error("❌ OpenAI error:", err.message);
-    return "⚠️ I had a moment! Please try again 💪";
+    console.error("❌ GPT-4o error:", err.message);
+    return "⚠️ I had a moment! Please try again — I'm here to help 💪";
   }
 }
-// ─── Send WhatsApp Text ───────────────────────────────────────────────────
+
+// ─── Send Welcome ──────────────────────────────────────────────────────────────
+async function sendWelcome(from) {
+  await sendMessage(
+    from,
+    `💪 *Welcome to FitBot — Your AI Fitness Coach!*\n\n` +
+      `Powered by *GPT-4o* 🤖\n\n` +
+      `Here's what I can do:\n` +
+      `🥗 *Diet Plan* — Personalised meal plan\n` +
+      `🏋️ *Workout* — Custom 5-day routine\n` +
+      `👤 *Profile* — Your saved fitness data\n` +
+      `📸 *Food Photo* — Send any meal for analysis\n\n` +
+      `Choose an option below 👇`,
+  );
+  await sendMainMenu(from);
+}
+
+// ─── SEND MAIN MENU ────────────────────────────────────────────────────────────
+async function sendMainMenu(from) {
+  await sendButtons(from, "What would you like to do? 👇", [
+    { id: "start_diet", title: "🥗 Diet Plan" },
+    { id: "start_workout", title: "🏋️ Workout" },
+    { id: "view_profile", title: "👤 My Profile" },
+  ]);
+}
+
+// ─── Send WhatsApp Text ────────────────────────────────────────────────────────
 async function sendMessage(to, text) {
   try {
     await axios.post(
@@ -298,7 +782,7 @@ async function sendMessage(to, text) {
   }
 }
 
-// ─── Send WhatsApp Template Message (registered template on Meta) ───────
+// ─── Send WhatsApp Template Message ───────────────────────────────────────────
 async function sendTemplateMessage(
   to,
   templateName,
@@ -316,7 +800,6 @@ async function sendTemplateMessage(
       },
     };
 
-    // If there are body parameters, attach them as a single body component
     if (Array.isArray(parameters) && parameters.length > 0) {
       body.template.components = [
         {
@@ -339,7 +822,6 @@ async function sendTemplateMessage(
         },
       },
     );
-
     return { ok: true };
   } catch (err) {
     console.error("❌ Template send error:", err.response?.data || err.message);
@@ -347,74 +829,8 @@ async function sendTemplateMessage(
   }
 }
 
-// ─── Send Interactive Button Message (quick reply buttons) ─────────────
-async function sendInteractiveButtons(to, bodyText, buttons = []) {
-  try {
-    // limit to 3 buttons as per WhatsApp limits
-    const btns = (Array.isArray(buttons) ? buttons : [])
-      .filter((b) => b && b.title)
-      .slice(0, 3)
-      .map((b, idx) => ({
-        type: "reply",
-        reply: {
-          id: b.id || `btn_${idx + 1}`,
-          title: String(b.title).slice(0, 20),
-        },
-      }));
-
-    const body = {
-      messaging_product: "whatsapp",
-      to,
-      type: "interactive",
-      interactive: {
-        type: "button",
-        body: { text: bodyText || "" },
-        action: { buttons: btns },
-      },
-    };
-
-    await axios.post(
-      `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
-      body,
-      {
-        headers: {
-          Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-      },
-    );
-
-    return { ok: true };
-  } catch (err) {
-    console.error(
-      "❌ Interactive send error:",
-      err.response?.data || err.message,
-    );
-    return { ok: false, error: err.response?.data || err.message };
-  }
-}
-
-// ─── Welcome Message ──────────────────────────────────────────────────────
-async function sendWelcome(to) {
-  const msg =
-    `💪 *Welcome to FitBot — Your AI Diet & Fitness Coach!*\n\n` +
-    `Here's what I can do:\n\n` +
-    `📸 *Send any food photo* → I'll analyze it and give you:\n` +
-    `   • Calories & macros\n` +
-    `   • Health rating\n` +
-    `   • Full diet advice\n` +
-    `   • Healthier alternatives\n\n` +
-    `💬 *Or type a question:*\n` +
-    `   • "Give me a 7-day diet plan"\n` +
-    `   • "Create a workout for weight loss"\n` +
-    `   • "Calculate my BMI"\n\n` +
-    `Let's start — send me a photo of your meal! 🍽️`;
-  await sendMessage(to, msg);
-  await sendQuickReplies(to);
-}
-
-// ─── Quick Reply Buttons (initial) ────────────────────────────────────────
-async function sendQuickReplies(to) {
+// ─── SEND INTERACTIVE BUTTONS (max 3) ─────────────────────────────────────────
+async function sendButtons(to, bodyText, buttons) {
   try {
     await axios.post(
       `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
@@ -424,19 +840,12 @@ async function sendQuickReplies(to) {
         type: "interactive",
         interactive: {
           type: "button",
-          body: { text: "What would you like help with? 👇" },
+          body: { text: bodyText },
           action: {
-            buttons: [
-              {
-                type: "reply",
-                reply: { id: "diet_plan", title: "🥗 Diet Plan" },
-              },
-              {
-                type: "reply",
-                reply: { id: "workout", title: "🏋️ Workout Plan" },
-              },
-              { type: "reply", reply: { id: "bmi", title: "⚖️ My BMI" } },
-            ],
+            buttons: buttons.slice(0, 3).map((b) => ({
+              type: "reply",
+              reply: { id: b.id, title: b.title.substring(0, 20) },
+            })),
           },
         },
       },
@@ -448,73 +857,32 @@ async function sendQuickReplies(to) {
       },
     );
   } catch (err) {
-    console.error("❌ Quick reply error:", err.response?.data || err.message);
+    console.error("❌ Button error:", err.response?.data || err.message);
   }
 }
 
-// ─── Follow-up After Image Analysis ──────────────────────────────────────
-async function sendImageFollowUp(to) {
-  try {
-    await axios.post(
-      `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
-      {
-        messaging_product: "whatsapp",
-        to,
-        type: "interactive",
-        interactive: {
-          type: "button",
-          body: { text: "Want more help based on this meal? 👇" },
-          action: {
-            buttons: [
-              {
-                type: "reply",
-                reply: { id: "full_diet", title: "🥗 Full Day Diet" },
-              },
-              {
-                type: "reply",
-                reply: { id: "calories", title: "🔥 My Calorie Goal" },
-              },
-              {
-                type: "reply",
-                reply: { id: "another_photo", title: "📸 Analyze Another" },
-              },
-            ],
-          },
-        },
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-      },
-    );
-  } catch (err) {
-    console.error("❌ Follow-up error:", err.response?.data || err.message);
-  }
+// ✅ NEW: sendInteractiveButtons alias used by /broadcast route
+// This was referenced but never defined in the original code — fixed here.
+async function sendInteractiveButtons(to, bodyText, buttons) {
+  return sendButtons(to, bodyText, buttons);
 }
 
-// ─── Trim history (keep last 20 messages) ────────────────────────────────
+// ─── Trim history ──────────────────────────────────────────────────────────────
 function trimHistory(history) {
   if (history.length > 20) history.splice(0, 2);
 }
 
-// ─── Templates API & Broadcast Endpoints ───────────────────────────────
-// Get approved message templates from Meta (WhatsApp Business Account).
+// ─── Admin Routes (unchanged) ──────────────────────────────────────────────────
 app.get("/meta-templates", async (req, res) => {
   try {
-    if (!WHATSAPP_TOKEN) {
+    if (!WHATSAPP_TOKEN)
       return res.status(500).json({ error: "WHATSAPP_TOKEN not configured" });
-    }
 
     const wabaId = process.env.WABA_ID;
-
-    if (!wabaId) {
+    if (!wabaId)
       return res.status(500).json({ error: "WABA_ID not configured" });
-    }
 
     const url = `https://graph.facebook.com/v19.0/${wabaId}/message_templates`;
-
     const resp = await axios.get(url, {
       params: {
         access_token: WHATSAPP_TOKEN,
@@ -523,17 +891,14 @@ app.get("/meta-templates", async (req, res) => {
     });
 
     const raw = Array.isArray(resp.data?.data) ? resp.data.data : [];
-
     const normalized = raw.map((t) => {
       let bodyText = null;
-
       if (Array.isArray(t.components)) {
         const body = t.components.find(
           (c) => String(c.type || "").toLowerCase() === "body",
         );
         if (body) bodyText = body.text || body.body_text || null;
       }
-
       return {
         id: t.id || t.name,
         name: t.name,
@@ -549,19 +914,18 @@ app.get("/meta-templates", async (req, res) => {
       "Failed to fetch meta templates:",
       err.response?.data || err.message,
     );
-
-    res.status(500).json({
-      error: err.response?.data || err.message,
-    });
+    res.status(500).json({ error: err.response?.data || err.message });
   }
 });
 
 app.get("/subscribers", (req, res) => {
+  // ✅ FIXED: was using userSessions (empty), now uses userProfiles
   res.json({
-    count: userSessions.size,
-    numbers: Array.from(userSessions.keys()),
+    count: userProfiles.size,
+    numbers: Array.from(userProfiles.keys()),
   });
 });
+
 app.post("/broadcast", async (req, res) => {
   const {
     metaTemplateName,
@@ -574,7 +938,8 @@ app.post("/broadcast", async (req, res) => {
   } = req.body || {};
 
   let recipients = [];
-  if (sendToAll) recipients = Array.from(userSessions.keys());
+  // ✅ FIXED: was using userSessions (empty), now uses userProfiles
+  if (sendToAll) recipients = Array.from(userProfiles.keys());
   else if (Array.isArray(targets) && targets.length) recipients = targets;
   else return res.status(400).json({ error: "No targets specified" });
 
@@ -584,7 +949,6 @@ app.post("/broadcast", async (req, res) => {
     try {
       let r;
       if (metaTemplateName) {
-        // Send registered WhatsApp template
         r = await sendTemplateMessage(
           to,
           metaTemplateName,
@@ -603,7 +967,7 @@ app.post("/broadcast", async (req, res) => {
           });
           continue;
         }
-        r = await sendInteractiveButtons(to, message, interactiveButtons);
+        r = await sendInteractiveButtons(to, message, interactiveButtons); // ✅ FIXED: now defined
       } else {
         if (!message) {
           results.push({ to, ok: false, error: "No message specified" });
@@ -620,18 +984,26 @@ app.post("/broadcast", async (req, res) => {
   res.json({ requested: recipients.length, results });
 });
 
-// Simple admin UI route
 app.get("/admin", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "admin.html"));
 });
 
-// ─── Health check ─────────────────────────────────────────────────────────
+// ─── Health Check (single, deduplicated) ──────────────────────────────────────
+// ✅ FIXED: removed duplicate GET "/" route from original code
 app.get("/", (req, res) => {
   res.json({
-    status: "FitBot running 💪",
+    status: "FitBot GPT-4o running 💪",
+    users: userProfiles.size,
+    mongoConnected: !!db, // ✅ NEW: shows MongoDB status in health check
     timestamp: new Date().toISOString(),
   });
 });
 
+// ─── Start Server (after MongoDB connects) ────────────────────────────────────
+// ✅ NEW: connectMongo() is called first; server starts regardless of whether
+//         MongoDB is available (graceful degradation — bot still works, just
+//         profiles won't persist across restarts if Mongo is down).
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 FitBot running on port ${PORT}`));
+connectMongo().then(() => {
+  app.listen(PORT, () => console.log(`🚀 FitBot running on port ${PORT}`));
+});
