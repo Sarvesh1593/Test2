@@ -1,7 +1,9 @@
 const express = require("express");
 const axios = require("axios");
 const OpenAI = require("openai");
-const { MongoClient } = require("mongodb"); // ✅ NEW: MongoDB driver
+const { MongoClient } = require("mongodb");
+const cron = require("node-cron"); // ← ADD THIS
+const moment = require("moment-timezone"); // ← ADD THIS // ✅ NEW: MongoDB driver
 
 const fs = require("fs");
 const path = require("path");
@@ -624,6 +626,258 @@ async function askWorkoutReminder(from, profile) {
     { id: "reminder_no", title: "❌ No thanks" },
   ]);
 }
+
+// ─── REMINDER FLOW — WORLD TIMEZONE SUPPORT ──────────────────────────────────
+// Two steps:
+//   Step 0 → user types their country/city/UTC offset
+//   Step 1 → user types time in HH:MM
+// moment-timezone converts UTC → user's local time in the cron job.
+
+// Phone prefix → IANA timezone (fallback when user's input can't be resolved)
+const PREFIX_TZ = {
+  91: "Asia/Kolkata",
+  1: "America/New_York",
+  44: "Europe/London",
+  61: "Australia/Sydney",
+  971: "Asia/Dubai",
+  966: "Asia/Riyadh",
+  92: "Asia/Karachi",
+  880: "Asia/Dhaka",
+  977: "Asia/Kathmandu",
+  94: "Asia/Colombo",
+  65: "Asia/Singapore",
+  60: "Asia/Kuala_Lumpur",
+  62: "Asia/Jakarta",
+  63: "Asia/Manila",
+  66: "Asia/Bangkok",
+  81: "Asia/Tokyo",
+  82: "Asia/Seoul",
+  86: "Asia/Shanghai",
+  49: "Europe/Berlin",
+  33: "Europe/Paris",
+  39: "Europe/Rome",
+  34: "Europe/Madrid",
+  7: "Europe/Moscow",
+  55: "America/Sao_Paulo",
+  52: "America/Mexico_City",
+  27: "Africa/Johannesburg",
+  20: "Africa/Cairo",
+  234: "Africa/Lagos",
+};
+function guessTzFromPhone(phone) {
+  for (const prefix of ["234", "971", "966", "880", "977", "62", "63"]) {
+    if (phone.startsWith(prefix)) return PREFIX_TZ[prefix];
+  }
+  for (const prefix of [
+    "91",
+    "44",
+    "61",
+    "92",
+    "94",
+    "65",
+    "60",
+    "66",
+    "81",
+    "82",
+    "86",
+    "49",
+    "33",
+    "39",
+    "34",
+    "55",
+    "52",
+    "27",
+    "20",
+    "7",
+    "1",
+  ]) {
+    if (phone.startsWith(prefix)) return PREFIX_TZ[prefix];
+  }
+  return "UTC";
+}
+
+// Country/city name → IANA timezone
+const COUNTRY_TZ_MAP = {
+  india: "Asia/Kolkata",
+  pakistan: "Asia/Karachi",
+  bangladesh: "Asia/Dhaka",
+  nepal: "Asia/Kathmandu",
+  "sri lanka": "Asia/Colombo",
+  dubai: "Asia/Dubai",
+  uae: "Asia/Dubai",
+  "abu dhabi": "Asia/Dubai",
+  "saudi arabia": "Asia/Riyadh",
+  riyadh: "Asia/Riyadh",
+  qatar: "Asia/Qatar",
+  kuwait: "Asia/Kuwait",
+  bahrain: "Asia/Bahrain",
+  oman: "Asia/Muscat",
+  singapore: "Asia/Singapore",
+  malaysia: "Asia/Kuala_Lumpur",
+  indonesia: "Asia/Jakarta",
+  philippines: "Asia/Manila",
+  thailand: "Asia/Bangkok",
+  vietnam: "Asia/Ho_Chi_Minh",
+  japan: "Asia/Tokyo",
+  "south korea": "Asia/Seoul",
+  korea: "Asia/Seoul",
+  china: "Asia/Shanghai",
+  "hong kong": "Asia/Hong_Kong",
+  taiwan: "Asia/Taipei",
+  uk: "Europe/London",
+  england: "Europe/London",
+  london: "Europe/London",
+  germany: "Europe/Berlin",
+  france: "Europe/Paris",
+  italy: "Europe/Rome",
+  spain: "Europe/Madrid",
+  russia: "Europe/Moscow",
+  turkey: "Europe/Istanbul",
+  netherlands: "Europe/Amsterdam",
+  poland: "Europe/Warsaw",
+  sweden: "Europe/Stockholm",
+  norway: "Europe/Oslo",
+  greece: "Europe/Athens",
+  usa: "America/New_York",
+  us: "America/New_York",
+  "united states": "America/New_York",
+  "new york": "America/New_York",
+  "los angeles": "America/Los_Angeles",
+  chicago: "America/Chicago",
+  canada: "America/Toronto",
+  mexico: "America/Mexico_City",
+  brazil: "America/Sao_Paulo",
+  argentina: "America/Argentina/Buenos_Aires",
+  colombia: "America/Bogota",
+  "south africa": "Africa/Johannesburg",
+  nigeria: "Africa/Lagos",
+  egypt: "Africa/Cairo",
+  kenya: "Africa/Nairobi",
+  ghana: "Africa/Accra",
+  australia: "Australia/Sydney",
+  "new zealand": "Pacific/Auckland",
+};
+
+function parseUtcOffset(str) {
+  const match = str.match(/utc([+-])(\d{1,2})(?::(\d{2}))?/i);
+  if (!match) return null;
+  const sign = match[1] === "+" ? 1 : -1;
+  const totalMin = sign * (parseInt(match[2]) * 60 + parseInt(match[3] || "0"));
+  return (
+    moment.tz.names().find((z) => moment.tz(z).utcOffset() === totalMin) || null
+  );
+}
+
+async function askReminderTimezone(from) {
+  await sendMessage(
+    from,
+    "🌍 *What is your country or city?*\n\n" +
+      "This lets me send reminders at the right time for YOU, anywhere in the world!\n\n" +
+      "Just type your country or city name:\n" +
+      "• India  • USA  • UK  • Dubai\n" +
+      "• Australia  • Singapore  • Nigeria\n\n" +
+      "Or type your UTC offset e.g. *UTC+5:30*",
+  );
+}
+
+async function handleReminderStep(from, text, profile) {
+  // ── Step 0: resolve timezone ──────────────────────────────────────────────
+  if (profile.step === 0) {
+    const lower = text.trim().toLowerCase();
+    let tz = COUNTRY_TZ_MAP[lower] || null;
+    if (!tz && lower.startsWith("utc")) tz = parseUtcOffset(lower);
+    if (!tz) {
+      for (const [key, val] of Object.entries(COUNTRY_TZ_MAP)) {
+        if (lower.includes(key) || key.includes(lower)) {
+          tz = val;
+          break;
+        }
+      }
+    }
+    if (!tz) tz = guessTzFromPhone(from);
+
+    profile.reminderTz = tz;
+    profile.step = 1;
+    await saveProfile(from, profile);
+
+    await sendMessage(
+      from,
+      `🌍 *Timezone: ${tz.replace(/_/g, " ")}* ✅\n\n` +
+        `⏰ *What time do you want your daily reminder?*\n\n` +
+        `Type in *HH:MM* (24-hour format)\n` +
+        `• *07:00* — 7 AM\n• *08:30* — 8:30 AM\n• *20:00* — 8 PM`,
+    );
+    return;
+  }
+
+  // ── Step 1: validate and save time ───────────────────────────────────────
+  if (profile.step === 1) {
+    const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
+    const trimmed = text.trim();
+    if (!timeRegex.test(trimmed)) {
+      await sendMessage(
+        from,
+        "❌ *Invalid format!*\n\nUse *HH:MM* (24-hour).\nExamples: *07:00*, *13:30*, *20:00*\n\nTry again 👇",
+      );
+      return;
+    }
+
+    profile.reminderOn = true;
+    profile.reminderTime = trimmed;
+    profile.flow = null;
+    await saveProfile(from, profile);
+
+    const [h, m] = trimmed.split(":");
+    const hour = parseInt(h);
+    const ampm = hour >= 12 ? "PM" : "AM";
+    const hour12 = hour % 12 || 12;
+    const tz = profile.reminderTz || "UTC";
+
+    await sendMessage(
+      from,
+      `🔔 *Reminder set!* ✅\n\n` +
+        `📍 Timezone: *${tz.replace(/_/g, " ")}*\n` +
+        `⏰ Every day at *${hour12}:${m} ${ampm}*\n\n` +
+        `I'll message you daily at this time, wherever you are 🌍\n` +
+        `Type *stop reminder* anytime to turn it off. 💪`,
+    );
+    await sendMainMenu(from);
+  }
+}
+
+// ─── CRON: every minute, checks all users in their OWN timezone ───────────────
+cron.schedule("* * * * *", async () => {
+  const utcNow = moment.utc();
+
+  for (const [phone, profile] of userProfiles.entries()) {
+    if (!profile.reminderOn || !profile.reminderTime) continue;
+    try {
+      const tz = profile.reminderTz || guessTzFromPhone(phone);
+      const local = utcNow.clone().tz(tz);
+      const nowTime = `${String(local.hours()).padStart(2, "0")}:${String(local.minutes()).padStart(2, "0")}`;
+      if (nowTime !== profile.reminderTime) continue;
+
+      const planLine = profile.workoutPlan
+        ? "🏋️ Don't skip today's workout session!"
+        : "🥗 Stay on track with your diet plan today!";
+      const goalLine = profile.goal
+        ? `Your goal: *${profile.goal}* — keep going! 🔥`
+        : "Stay consistent — results take time! 💪";
+
+      await sendMessage(
+        phone,
+        `⏰ *FitBot Daily Reminder*\n\n` +
+          `Time to crush your fitness goals! 💪\n\n` +
+          `${planLine}\n` +
+          `${goalLine}\n\n` +
+          `_Type *menu* to see your full plan_ 📋`,
+      );
+      console.log(`✅ Reminder → ${phone} | ${tz} | ${nowTime}`);
+    } catch (err) {
+      console.error(`❌ Reminder failed for ${phone}:`, err.message);
+    }
+  }
+});
 
 // ─── PROFILE CARD ──────────────────────────────────────────────────────────────
 async function sendProfileCard(from, profile) {
