@@ -363,15 +363,11 @@ async function handleInteractive(from, id, label, profile) {
       break;
 
     case "reminder_yes":
-      profile.reminderOn = true;
-      profile.schedule = "Daily reminder ON";
-      await sendMessage(
-        from,
-        "🔔 *Daily reminders set!* I'll notify you every day to follow your plan. Your profile has been updated ✅",
-      );
-      profile.flow = null;
-      await saveProfile(from, profile); // ✅ NEW
-      await sendMainMenu(from);
+      // Step 0 = ask timezone, Step 1 = ask time
+      profile.flow = "reminder";
+      profile.step = 0;
+      await saveProfile(from, profile);
+      await askReminderTimezone(from); // CHANGED: ask timezone first
       break;
 
     case "reminder_no":
