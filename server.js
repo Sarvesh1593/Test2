@@ -49,6 +49,7 @@ async function connectMongo() {
 const userProfiles = new Map();
 
 // ─── Default profile shape ────────────────────────────────────────────────────
+// ✅ NEW
 function defaultProfile() {
   return {
     age: null,
@@ -61,17 +62,19 @@ function defaultProfile() {
     timing: null,
     schedule: null,
     reminderOn: false,
+    reminderTime: null,
+    reminderTz: null,
+    reminderStep: 0,
     dietPlan: null,
     workoutPlan: null,
     flow: null,
     step: 0,
     history: [],
-    welcomed: false, // ← tracks if Welcome screen was already sent
+    welcomed: false,
     createdAt: new Date(),
     updatedAt: new Date(),
   };
 }
-
 // ─── getProfile: load from cache OR MongoDB ───────────────────────────────────
 // ✅ NEW: Now async. On first call for a phone number it hits MongoDB.
 //         After that the in-memory cache is used (fast).
@@ -775,10 +778,10 @@ async function askReminderTimezone(from) {
       "Or type your UTC offset e.g. *UTC+5:30*",
   );
 }
-
+// ✅ NEW
 async function handleReminderStep(from, text, profile) {
-  // ── Step 0: resolve timezone ──────────────────────────────────────────────
-  if (profile.step === 0) {
+  // ── Step 0: user types country/city → resolve timezone ───────────────────
+  if (profile.reminderStep === 0) {
     const lower = text.trim().toLowerCase();
     let tz = COUNTRY_TZ_MAP[lower] || null;
     if (!tz && lower.startsWith("utc")) tz = parseUtcOffset(lower);
@@ -793,7 +796,7 @@ async function handleReminderStep(from, text, profile) {
     if (!tz) tz = guessTzFromPhone(from);
 
     profile.reminderTz = tz;
-    profile.step = 1;
+    profile.reminderStep = 1;
     await saveProfile(from, profile);
 
     await sendMessage(
@@ -806,8 +809,8 @@ async function handleReminderStep(from, text, profile) {
     return;
   }
 
-  // ── Step 1: validate and save time ───────────────────────────────────────
-  if (profile.step === 1) {
+  // ── Step 1: user types HH:MM → save reminder ─────────────────────────────
+  if (profile.reminderStep === 1) {
     const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
     const trimmed = text.trim();
     if (!timeRegex.test(trimmed)) {
@@ -820,6 +823,7 @@ async function handleReminderStep(from, text, profile) {
 
     profile.reminderOn = true;
     profile.reminderTime = trimmed;
+    profile.reminderStep = 0;
     profile.flow = null;
     await saveProfile(from, profile);
 
